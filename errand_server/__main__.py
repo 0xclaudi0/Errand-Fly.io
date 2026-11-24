@@ -4,7 +4,8 @@
     install DIR --id ID --name N   install DIR/main.py (--schedule SPEC | --webhook | --manual)
     run ID                         run one automation now and print the result
     list                           list automations and their last run
-    set KEY VALUE                  change a setting (notify_email, email_from, timezone)
+    set KEY VALUE                  change a setting (notify_email, email_from, timezone, auto_repair)
+    login-link                     print a one-time link that logs a browser in (10 minutes)
     build MESSAGE [--draft ID]     ask the builder agent for an automation (or continue a draft)
     approve DRAFT                  install the draft's tested proposal
     drafts                         list builder drafts
@@ -21,9 +22,10 @@ import sys
 import time
 from pathlib import Path
 
-from errand_sdk import gateway, web as sdk_web
+from errand_sdk import gateway, send_email, web as sdk_web
 
-from . import runner
+from . import runner, settings
+from .auth import Auth
 from .builder import Builder, BuilderError
 from .builder_tools import Toolbox
 from .config import DEFAULT_PORT, DEFAULT_TIMEOUT_S, Paths, load_or_create_secrets, paths_from_env
@@ -31,9 +33,11 @@ from .db import Repository
 from .drafts import DraftStore
 from .install import install
 from .jobs import Dispatcher
+from .repair import Repairer
+from .sprite_api import SpriteApi
 from .web import App, make_server
 
-SETTING_KEYS = ("notify_email", "email_from", "timezone")
+SETTING_KEYS = settings.KEYS
 
 log = logging.getLogger("errand")
 
@@ -48,28 +52,45 @@ def main(argv: list[str] | None = None) -> int:
     return args.func(args, paths, repo)
 
 
-def make_builder(paths: Paths, repo: Repository, background: bool) -> tuple[Builder, DraftStore]:
+def make_builder(paths: Paths, repo: Repository, background: bool,
+                 sprite: SpriteApi | None = None) -> tuple[Builder, DraftStore]:
     store = DraftStore(paths)
     toolbox = Toolbox(store, paths, repo, execute=runner.execute,
                       providers=gateway.providers, fetch=sdk_web.fetch_text)
+    sprite = sprite or SpriteApi()
     builder = Builder(store, paths, repo, toolbox, settings=lambda: _settings(paths),
-                      background=background)
+                      background=background, checkpoint=sprite.create_checkpoint)
     return builder, store
 
 
 def _settings(paths: Paths) -> dict:
-    return json.loads(paths.settings.read_text()) if paths.settings.exists() else {}
+    return settings.load(paths.settings)
+
+
+def sprite_url(sprite: SpriteApi) -> str:
+    """The Sprite's own URL, for links in emails and login links."""
+    try:
+        return sprite.info().get("sprite_url", "")
+    except Exception as err:
+        log.warning("could not read the Sprite URL: %s", err)
+        return ""
 
 
 def cmd_serve(args, paths, repo) -> int:
     closed = repo.mark_interrupted(time.time())
     if closed:
         log.warning("closed %d run(s) that a restart interrupted", closed)
-    builder, store = make_builder(paths, repo, background=True)
+    sprite = SpriteApi()
+    base = sprite_url(sprite)
+    builder, store = make_builder(paths, repo, background=True, sprite=sprite)
     stuck = builder.recover()
     if stuck:
         log.warning("marked %d builder draft(s) that a restart interrupted", stuck)
-    app = App(repo, Dispatcher(repo, paths), load_or_create_secrets(paths), builder, store)
+    repairer = Repairer(repo, builder, settings=lambda: _settings(paths),
+                        notify=send_email, base_url=lambda: base)
+    dispatcher = Dispatcher(repo, paths, on_failure=repairer.on_failure)
+    app = App(repo, dispatcher, load_or_create_secrets(paths), builder, store,
+              auth=Auth(paths.auth), paths=paths, sprite=sprite, base_url=lambda: base)
     port = int(os.environ.get("PORT", DEFAULT_PORT))
     log.info("errand-server listening on :%d, home %s", port, paths.home)
     make_server(app, "0.0.0.0", port).serve_forever()
@@ -113,8 +134,20 @@ def cmd_list(args, paths, repo) -> int:
 
 
 def cmd_set(args, paths, repo) -> int:
-    paths.settings.write_text(json.dumps({**_settings(paths), args.key: args.value}, indent=2))
+    try:
+        settings.update(paths.settings, {args.key: args.value})
+    except ValueError as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
     print(f"{args.key} set")
+    return 0
+
+
+def cmd_login_link(args, paths, repo) -> int:
+    code = Auth(paths.auth).new_login_code()
+    base = sprite_url(SpriteApi()) or "http://localhost:8080"
+    print(f"{base.rstrip('/')}/login?code={code}")
+    print("The link works once, for 10 minutes.", file=sys.stderr)
     return 0
 
 
@@ -208,6 +241,8 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("key", choices=SETTING_KEYS)
     p.add_argument("value")
     p.set_defaults(func=cmd_set)
+
+    sub.add_parser("login-link").set_defaults(func=cmd_login_link)
 
     p = sub.add_parser("build")
     p.add_argument("message")

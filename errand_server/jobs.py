@@ -20,6 +20,7 @@ from .schedule import next_run, parse_schedule
 
 SDK_ROOT = Path(__file__).resolve().parent.parent  # folder that holds errand_sdk/
 PASS_THROUGH_ENV = ("PATH", "HOME", "LANG", "TZ", "SSL_CERT_FILE")
+FAILED = ("error", "timeout")
 
 log = logging.getLogger(__name__)
 
@@ -33,6 +34,7 @@ class Dispatcher:
         execute: Callable[..., RunOutcome] = runner.execute,
         clock: Callable[[], float] = time.time,
         background: bool = True,
+        on_failure: Callable[[Automation, int], None] | None = None,
     ) -> None:
         self._repo = repo
         self._paths = paths
@@ -40,6 +42,7 @@ class Dispatcher:
         self._execute = execute
         self._clock = clock
         self._background = background
+        self._on_failure = on_failure
         self._slots = threading.BoundedSemaphore(MAX_PARALLEL_RUNS)
 
     def tick(self) -> list[str]:
@@ -70,7 +73,7 @@ class Dispatcher:
         if run_id is None:
             log.info("skip %s (%s): a run is already active", automation.id, trigger)
             return None
-        event_file = self._write_event(run_id, event)
+        event_file = self._write_event(run_id, event, automation.id)
         hold_s = automation.timeout_s + HOLD_MARGIN_S
         try:
             with self._keep_awake(f"errand-run-{run_id}", hold_s):
@@ -87,13 +90,20 @@ class Dispatcher:
         self._repo.finish_run(run_id, outcome.status, outcome.exit_code, outcome.output,
                               self._clock())
         log.info("run %s of %s: %s", run_id, automation.id, outcome.status)
+        if outcome.status in FAILED and self._on_failure is not None:
+            try:
+                self._on_failure(automation, run_id)
+            except Exception:
+                log.exception("failure hook for run %s crashed", run_id)
         return run_id
 
-    def _write_event(self, run_id: int, event: Any) -> Path | None:
+    def _write_event(self, run_id: int, event: Any, automation_id: str) -> Path | None:
         if event is None:
             return None
         path = self._paths.tmp / f"event-{run_id}.json"
         path.write_text(json.dumps(event))
+        # Keep the last payload, so a repair can replay the input that failed.
+        (self._paths.events / f"{automation_id}.json").write_text(json.dumps(event))
         return path
 
     def _env(self, automation: Automation, run_id: int, trigger: str,

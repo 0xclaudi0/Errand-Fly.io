@@ -56,3 +56,27 @@ def test_install_rejects_bad_input(repo, paths, source, kwargs, message):
 def test_install_needs_main_py(repo, paths, tmp_path):
     with pytest.raises(ValueError, match="main.py"):
         install(repo, paths, tmp_path, automation_id="x", name="x", trigger="manual")
+
+
+def test_versions_and_roll_back(repo, paths, source):
+    from errand_server import history
+
+    install(repo, paths, source, automation_id="d", name="D", trigger="manual")
+    (source / "main.py").write_text("print('v2')\n")
+    (source / "extra.py").write_text("X = 1\n")
+    install(repo, paths, source, automation_id="d", name="D", trigger="manual")
+    folder = paths.automation_dir("d")
+    (folder / "state.json").write_text('{"keep": true}')
+    first, second = history.versions(folder)[::-1]
+    assert [first["message"], second["message"]] == ["install d", "update d"]
+
+    history.roll_back(folder, first["sha"][:7])
+    assert (folder / "main.py").read_text() == "print('v1')\n"
+    assert not (folder / "extra.py").exists()
+    assert (folder / "state.json").read_text() == '{"keep": true}'
+    assert history.versions(folder)[0]["message"] == f"roll back to {first['sha'][:7]}"
+    with pytest.raises(ValueError, match="current one"):
+        history.roll_back(folder, first["sha"])
+    with pytest.raises(ValueError):
+        history.roll_back(folder, "not-a-sha")
+    assert history.versions(paths.automation_dir("missing")) == []

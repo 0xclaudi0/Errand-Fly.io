@@ -69,13 +69,33 @@ class Repository:
     # Automations
 
     def save_automation(self, a: Automation) -> None:
+        # An upsert, not INSERT OR REPLACE: REPLACE deletes the old row first, and
+        # ON DELETE CASCADE would then delete the run history of the automation.
         with self._tx() as conn:
             conn.execute(
-                f"INSERT OR REPLACE INTO automations ({AUTOMATION_COLUMNS})"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                f"INSERT INTO automations ({AUTOMATION_COLUMNS})"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                " ON CONFLICT(id) DO UPDATE SET name = excluded.name,"
+                " description = excluded.description, trigger = excluded.trigger,"
+                " schedule = excluded.schedule, hook_id = excluded.hook_id,"
+                " enabled = excluded.enabled, timeout_s = excluded.timeout_s,"
+                " next_run_at = excluded.next_run_at, created_at = excluded.created_at",
                 (a.id, a.name, a.description, a.trigger, a.schedule, a.hook_id,
                  int(a.enabled), a.timeout_s, a.next_run_at, a.created_at),
             )
+
+    def set_enabled(self, automation_id: str, enabled: bool, next_run_at: float | None) -> None:
+        with self._tx() as conn:
+            conn.execute(
+                "UPDATE automations SET enabled = ?, next_run_at = ? WHERE id = ?",
+                (int(enabled), next_run_at, automation_id),
+            )
+
+    def delete_automation(self, automation_id: str) -> bool:
+        """Delete the automation and (by cascade) its runs."""
+        with self._tx() as conn:
+            return conn.execute("DELETE FROM automations WHERE id = ?",
+                                (automation_id,)).rowcount > 0
 
     def get_automation(self, automation_id: str) -> Automation | None:
         return self._one_automation("id = ?", (automation_id,))
@@ -150,6 +170,12 @@ class Repository:
                 (now,),
             )
             return cur.rowcount
+
+    def get_run(self, run_id: int) -> Run | None:
+        with self._tx() as conn:
+            row = conn.execute(f"SELECT {RUN_COLUMNS} FROM runs WHERE id = ?",
+                               (run_id,)).fetchone()
+            return Run(*row) if row else None
 
     def list_runs(self, automation_id: str, limit: int = 20) -> list[Run]:
         with self._tx() as conn:

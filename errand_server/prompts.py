@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 
 SDK_REFERENCE = """\
@@ -79,3 +80,52 @@ def system_prompt(timezone: str | None, now: float | None = None) -> str:
     stamp = time.strftime("%Y-%m-%d %H:%M %a", time.gmtime(now or time.time()))
     return SYSTEM_PROMPT.format(sdk=SDK_REFERENCE, now=stamp,
                                 timezone=timezone or "unknown (ask if a clock time matters)")
+
+
+EDIT_CONTEXT = """\
+You are changing the installed automation "{id}" ({name}).
+Trigger: {trigger}{schedule}. Timeout: {timeout_s} s.
+Its current files are already in the draft; write_file replaces a file.
+When you call propose, keep the id "{id}". The installed state.json is kept after
+the update, so keep the state format compatible unless the owner asks otherwise.
+
+{files}
+{run}
+{event}
+{state}
+Owner's request:
+{request}
+"""
+
+REPAIR_REQUEST = (
+    "The last run failed or did the wrong thing. Find the cause in the run output, fix "
+    "the code, dry run it with the same input, and propose the fix."
+)
+
+CONTEXT_CHARS = 3000
+
+
+def edit_context(automation: dict, files: dict[str, str], run: dict | None,
+                 event: object, state: object, request: str) -> str:
+    schedule = f" ({automation['schedule']})" if automation.get("schedule") else ""
+    file_text = "\n".join(f"--- {name}\n{code}" for name, code in files.items())
+    run_text = ""
+    if run:
+        run_text = (f"Run #{run['id']} ({run['trigger']}) ended with status {run['status']}"
+                    f" and exit code {run['exit_code']}. Its output (last part):\n"
+                    f"{run['output'][-CONTEXT_CHARS:]}\n")
+    event_text = ""
+    if event is not None:
+        event_text = ("The last webhook payload (use it as event_json in dry_run):\n"
+                      f"{_short_json(event)}\n")
+    state_text = f"Current state.json:\n{_short_json(state)}\n" if state is not None else ""
+    return EDIT_CONTEXT.format(
+        id=automation["id"], name=automation["name"], trigger=automation["trigger"],
+        schedule=schedule, timeout_s=automation["timeout_s"], files=file_text,
+        run=run_text, event=event_text, state=state_text, request=request,
+    )
+
+
+def _short_json(value: object) -> str:
+    text = json.dumps(value, indent=1, default=str)
+    return text if len(text) <= CONTEXT_CHARS else text[:CONTEXT_CHARS] + "\n... (cut)"

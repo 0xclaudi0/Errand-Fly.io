@@ -20,7 +20,9 @@ from typing import Any
 from .config import Paths
 
 DRAFT_ID = re.compile(r"^d-[0-9a-f]{8}$")
-STATUSES = ("working", "waiting", "proposed", "installed", "error")
+STATUSES = ("working", "waiting", "proposed", "installed", "error", "discarded")
+KINDS = ("new", "change", "repair")
+CLOSED = ("installed", "discarded")
 
 
 @dataclass(frozen=True)
@@ -36,6 +38,8 @@ class Draft:
     tested: bool = False     # a dry run passed after the last file change
     installed: str | None = None
     error: str | None = None
+    target: str | None = None  # the installed automation that a change or repair edits
+    kind: str = "new"
 
     def with_changes(self, **changes: Any) -> "Draft":
         return dataclasses.replace(self, updated_at=time.time(), **changes)
@@ -52,10 +56,10 @@ class DraftStore:
     def __init__(self, paths: Paths) -> None:
         self._root = paths.drafts
 
-    def create(self) -> Draft:
+    def create(self, target: str | None = None, kind: str = "new") -> Draft:
         now = time.time()
         draft = Draft(id=f"d-{secrets.token_hex(4)}", status="waiting",
-                      created_at=now, updated_at=now)
+                      created_at=now, updated_at=now, target=target, kind=kind)
         self.code_dir(draft.id).mkdir(parents=True)
         self.save(draft)
         return draft
@@ -109,6 +113,8 @@ def public_view(draft: Draft, files: dict[str, str]) -> dict:
         "tested": draft.tested,
         "installed": draft.installed,
         "error": draft.error,
+        "target": draft.target,
+        "kind": draft.kind,
         "files": files,
     }
 
@@ -116,5 +122,6 @@ def public_view(draft: Draft, files: dict[str, str]) -> dict:
 def summary_view(draft: Draft) -> dict:
     first = next((t["text"] for t in draft.transcript if t["role"] == "user"), "")
     return {"id": draft.id, "status": draft.status, "updated_at": draft.updated_at,
-            "request": first[:200], "installed": draft.installed}
+            "request": first[:200], "installed": draft.installed,
+            "target": draft.target, "kind": draft.kind}
 

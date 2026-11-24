@@ -138,15 +138,18 @@ class Toolbox:
         output = outcome.output[-TOOL_OUTPUT_CHARS:]
         record = {"status": outcome.status, "exit_code": outcome.exit_code,
                   "seconds": seconds, "output": output, "event": bool(event_file)}
-        draft = draft.note("step", f"Dry run {run_no}: {outcome.status} in {seconds} s",
+        word = {"ok": "passed", "timeout": "timed out"}.get(outcome.status, "failed")
+        draft = draft.note("step", f"Dry run {run_no} {word} in {seconds} s",
                            dry_runs=draft.dry_runs + (record,), tested=outcome.status == "ok")
         return draft, {k: record[k] for k in ("status", "exit_code", "seconds", "output")}
 
     def _tool_propose(self, draft: Draft, args: dict) -> Result:
         if not draft.tested:
             return draft, {"error": "run dry_run after the last change, and make it pass first"}
+        if draft.target:  # a change or repair keeps the installed id
+            args = {**args, "id": draft.target}
         proposal = _proposal(args)
-        if self._repo.get_automation(proposal["id"]) is not None:
+        if not draft.target and self._repo.get_automation(proposal["id"]) is not None:
             return draft, {"error": f"an automation {proposal['id']!r} exists; choose another id"}
         draft = draft.note("step", f"Proposed {proposal['id']}", proposal=proposal)
         return draft, {"ok": True, "next": "Tell the owner what it does and ask them to approve."}

@@ -12,6 +12,7 @@ import json
 import logging
 import threading
 import time
+from pathlib import Path
 from typing import Any, Callable
 
 from errand_sdk.llm import LLMError, ModelHealth, Post, generate, reply_text
@@ -19,11 +20,11 @@ from errand_sdk.llm import LLMError, ModelHealth, Post, generate, reply_text
 from . import keepawake
 from .config import Paths
 from .db import Repository
-from .drafts import Draft, DraftStore
+from .builder_tools import DECLARATIONS, Toolbox
+from .drafts import CLOSED, Draft, DraftStore
 from .install import install
 from .models import Automation
-from .prompts import system_prompt
-from .builder_tools import DECLARATIONS, Toolbox
+from .prompts import REPAIR_REQUEST, edit_context, system_prompt
 
 BUILDER_MODELS = ("gemini-flash-lite-latest", "gemini-3.1-flash-lite",
                   "gemini-flash-latest", "gemini-3.5-flash")
@@ -35,6 +36,8 @@ BUILD_HOLD_S = 900
 FOREIGN_SIGNATURE = "skip_thought_signature_validator"
 
 log = logging.getLogger(__name__)
+
+TurnEnd = Callable[[Draft], None]
 
 
 class BuilderError(Exception):
@@ -50,7 +53,8 @@ class Builder:
                  keep_awake: Callable = keepawake.keep_awake,
                  settings: Callable[[], dict] = dict, background: bool = True,
                  sleep: Callable[[float], None] = time.sleep,
-                 health: ModelHealth | None = None) -> None:
+                 health: ModelHealth | None = None,
+                 checkpoint: Callable[[str], str] | None = None) -> None:
         self._store = store
         self._paths = paths
         self._repo = repo
@@ -62,6 +66,7 @@ class Builder:
         self._background = background
         self._sleep = sleep
         self._health = health or ModelHealth()
+        self._checkpoint = checkpoint
         self._locks: dict[str, threading.Lock] = {}
         self._guard = threading.Lock()
 
@@ -71,15 +76,46 @@ class Builder:
         _check_message(message)
         return self.send(self._store.create().id, message)
 
-    def send(self, draft_id: str, message: str) -> Draft:
-        """Add the owner's message and start a turn (in the background by default)."""
+    def start_edit(self, automation_id: str, message: str, *, kind: str = "change",
+                   run_id: int | None = None, then: TurnEnd | None = None) -> Draft:
+        """Start a draft that changes (or repairs) an installed automation."""
+        _check_message(message)
+        automation = self._repo.get_automation(automation_id)
+        if automation is None:
+            raise BuilderError(404, "no such automation")
+        run = self._repo.get_run(run_id) if run_id is not None else None
+        if run_id is not None and (run is None or run.automation_id != automation_id):
+            raise BuilderError(404, "no such run for this automation")
+        folder = self._paths.automation_dir(automation_id)
+        draft = self._store.create(target=automation_id, kind=kind)
+        code = self._store.code_dir(draft.id)
+        files = {}
+        for source in sorted(folder.glob("*.py")):
+            files[source.name] = source.read_text()
+            (code / source.name).write_text(files[source.name])
+        request = f"{message}\n{REPAIR_REQUEST}" if kind == "repair" else message
+        context = edit_context(
+            automation.to_dict(), files, run.to_dict() if run else None,
+            _read_json(self._paths.events / f"{automation_id}.json"),
+            _read_json(folder / "state.json"), request,
+        )
+        return self.send(draft.id, message, model_text=context, then=then)
+
+    def send(self, draft_id: str, message: str, *, model_text: str | None = None,
+             then: TurnEnd | None = None) -> Draft:
+        """Add the owner's message and start a turn (in the background by default).
+
+        `model_text` is what the model reads in place of `message` (the edit context);
+        the transcript always shows `message`. `then(draft)` runs after the turn.
+        """
         _check_message(message)
         lock = self._acquire(draft_id)
         try:
             draft = self._load(draft_id)
-            if draft.status == "installed":
-                raise BuilderError(409, "this draft is installed; start a new one")
-            entry = {"model": None, "content": {"role": "user", "parts": [{"text": message}]}}
+            if draft.status in CLOSED:
+                raise BuilderError(409, f"this draft is {draft.status}; start a new one")
+            text = model_text or message
+            entry = {"model": None, "content": {"role": "user", "parts": [{"text": text}]}}
             draft = draft.note("user", message, status="working", error=None,
                                contents=draft.contents + (entry,))
             self._store.save(draft)
@@ -87,10 +123,10 @@ class Builder:
             lock.release()
             raise
         if self._background:
-            threading.Thread(target=self._turn_then_release, args=(draft, lock),
+            threading.Thread(target=self._turn_then_release, args=(draft, lock, then),
                              name=f"build-{draft_id}", daemon=True).start()
         else:
-            self._turn_then_release(draft, lock)
+            self._turn_then_release(draft, lock, then)
         return self._load(draft_id)
 
     def approve(self, draft_id: str) -> Automation:
@@ -100,19 +136,42 @@ class Builder:
             proposal = draft.proposal
             if draft.status != "proposed" or not proposal or not draft.tested:
                 raise BuilderError(409, "nothing to approve: the draft has no tested proposal")
-            if self._repo.get_automation(proposal["id"]) is not None:
+            existing = self._repo.get_automation(proposal["id"])
+            if existing is not None and proposal["id"] != draft.target:
                 raise BuilderError(409, f"an automation {proposal['id']!r} exists already")
+            if draft.target and existing is None:
+                raise BuilderError(409, f"{draft.target!r} was deleted; start a new draft")
+            draft = self._save_checkpoint(draft, f"before {'update' if existing else 'install'}"
+                                                 f" of {proposal['id']}")
             automation = install(
                 self._repo, self._paths, self._store.code_dir(draft_id),
                 automation_id=proposal["id"], name=proposal["name"],
                 trigger=proposal["trigger"], schedule=proposal["schedule"],
                 timeout_s=proposal["timeout_s"], description=proposal["summary"],
             )
-            self._store.save(draft.note("step", f"Installed {automation.id}",
+            verb = "Updated" if existing else "Installed"
+            self._store.save(draft.note("step", f"{verb} {automation.id}",
                                         status="installed", installed=automation.id))
             return automation
         finally:
             lock.release()
+
+    def discard(self, draft_id: str) -> Draft:
+        lock = self._acquire(draft_id)
+        try:
+            draft = self._load(draft_id)
+            if draft.status == "installed":
+                raise BuilderError(409, "this draft is installed already")
+            draft = draft.note("step", "Discarded", status="discarded")
+            self._store.save(draft)
+            return draft
+        finally:
+            lock.release()
+
+    def open_draft(self, target: str, kind: str) -> Draft | None:
+        """The newest draft of this kind for `target` that is not installed or discarded."""
+        return next((d for d in self._store.list()
+                     if d.target == target and d.kind == kind and d.status not in CLOSED), None)
 
     def recover(self) -> int:
         """After a restart, no turn is running: mark stuck drafts so the owner can retry."""
@@ -120,13 +179,14 @@ class Builder:
         for draft in self._store.list():
             if draft.status == "working":
                 self._store.save(draft.with_changes(
-                    status="error", error="a restart stopped this turn; send a message to retry"))
+                    status="error", error="a restart stopped this turn. Send a message to retry."))
                 count += 1
         return count
 
     # ---- the turn ---------------------------------------------------------
 
-    def _turn_then_release(self, draft: Draft, lock: threading.Lock) -> None:
+    def _turn_then_release(self, draft: Draft, lock: threading.Lock,
+                           then: TurnEnd | None = None) -> None:
         try:
             with self._keep_awake(f"errand-build-{draft.id}", BUILD_HOLD_S):
                 draft = self._turn(draft)
@@ -136,6 +196,21 @@ class Builder:
         finally:
             self._store.save(draft)
             lock.release()
+        if then is not None:
+            try:
+                then(draft)
+            except Exception:
+                log.exception("after-turn callback for %s failed", draft.id)
+
+    def _save_checkpoint(self, draft: Draft, comment: str) -> Draft:
+        if self._checkpoint is None:
+            return draft
+        try:
+            checkpoint_id = self._checkpoint(comment)
+        except Exception as err:  # an undo point is nice to have; it must not block the install
+            log.warning("checkpoint before install failed: %s", err)
+            return draft.note("step", f"Could not save a checkpoint ({err})")
+        return draft.note("step", f"Saved checkpoint {checkpoint_id} (undo point)")
 
     def _turn(self, draft: Draft) -> Draft:
         for _ in range(MAX_STEPS):
@@ -144,7 +219,8 @@ class Builder:
                     lambda m: self._body(draft, m), models=self._models, post=self._post,
                     timeout_s=MODEL_TIMEOUT_S, health=self._health, sleep=self._sleep)
             except LLMError as err:
-                return draft.with_changes(status="error", error=str(err))
+                return draft.with_changes(
+                    status="error", error=f"{err}. The models may be busy; send a message to retry.")
             draft = draft.with_changes(
                 contents=draft.contents + ({"model": model, "content": content},))
             calls = [p["functionCall"] for p in content.get("parts", []) if p.get("functionCall")]
@@ -195,6 +271,13 @@ class Builder:
         if draft is None:
             raise BuilderError(404, "no such draft")
         return draft
+
+
+def _read_json(path: Path) -> Any:
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
 
 
 def _check_message(message: Any) -> None:

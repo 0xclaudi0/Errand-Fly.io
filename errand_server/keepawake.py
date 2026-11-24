@@ -10,41 +10,19 @@ API socket does, until it expires or we delete it:
 
 from __future__ import annotations
 
-import http.client
-import json
 import logging
-import socket
 from contextlib import contextmanager
 from typing import Iterator
 
-SOCKET_PATH = "/.sprite/api.sock"
+from .sprite_api import SOCKET_PATH, request
+
 MAX_HOLD_S = 3600
 
 log = logging.getLogger(__name__)
 
 
-class _UnixConnection(http.client.HTTPConnection):
-    def __init__(self, path: str) -> None:
-        super().__init__("localhost", timeout=5)
-        self._path = path
-
-    def connect(self) -> None:
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        sock.settimeout(5)
-        sock.connect(self._path)
-        self.sock = sock
-
-
 def _request(method: str, path: str, body: dict | None, socket_path: str) -> int:
-    conn = _UnixConnection(socket_path)
-    try:
-        payload = json.dumps(body) if body is not None else None
-        conn.request(method, path, payload, {"Content-Type": "application/json"})
-        resp = conn.getresponse()
-        resp.read()
-        return resp.status
-    finally:
-        conn.close()
+    return request(method, path, body, socket_path=socket_path)[0]
 
 
 @contextmanager

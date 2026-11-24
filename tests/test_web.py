@@ -110,7 +110,7 @@ def test_api_lists_automations_with_admin_token(server, repo):
     status, body = call(f"{base}/api/automations", headers={"Authorization": "Bearer admin-secret"})
     assert status == 200
     assert [a["id"] for a in body["data"]] == ["price-watch"]
-    assert "hook_id" in body["data"][0]
+    assert "hook_id" not in body["data"][0] and body["data"][0]["last_run"] is None
 
 
 def test_api_manual_run(server, repo):

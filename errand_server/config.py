@@ -38,6 +38,15 @@ class Paths:
         return self.home / "drafts"
 
     @property
+    def events(self) -> Path:
+        """The last webhook payload of each automation, for repairs."""
+        return self.home / "events"
+
+    @property
+    def auth(self) -> Path:
+        return self.home / "auth.json"
+
+    @property
     def secrets(self) -> Path:
         return self.home / "secrets.json"
 
@@ -49,7 +58,7 @@ class Paths:
         return self.automations / automation_id
 
     def ensure(self) -> None:
-        for folder in (self.home, self.automations, self.tmp, self.drafts):
+        for folder in (self.home, self.automations, self.tmp, self.drafts, self.events):
             folder.mkdir(parents=True, exist_ok=True)
 
 

@@ -108,3 +108,23 @@ def test_valid_ids(value):
 def test_invalid_ids(value):
     with pytest.raises(ValueError):
         validate_id(value)
+
+
+def test_updating_an_automation_keeps_its_runs(repo):
+    repo.save_automation(make())
+    run_id = repo.start_run("price-watch", "manual", 1.0)
+    repo.finish_run(run_id, "ok", 0, "x", 2.0)
+    repo.save_automation(make(name="Renamed"))
+    assert repo.get_automation("price-watch").name == "Renamed"
+    assert [r.id for r in repo.list_runs("price-watch")] == [run_id]
+    assert repo.get_run(run_id).status == "ok" and repo.get_run(999) is None
+
+
+def test_enable_and_delete(repo):
+    repo.save_automation(make())
+    repo.start_run("price-watch", "manual", 1.0)
+    repo.set_enabled("price-watch", False, None)
+    assert repo.get_automation("price-watch").enabled is False
+    assert repo.delete_automation("price-watch") is True
+    assert repo.get_automation("price-watch") is None and repo.list_runs("price-watch") == []
+    assert repo.delete_automation("price-watch") is False

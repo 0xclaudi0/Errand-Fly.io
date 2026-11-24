@@ -236,6 +236,7 @@ def test_every_model_failing_marks_the_draft_as_error(kit):
     builder, _ = make(*[GatewayError(503, "busy")] * 4)
     draft = builder.start("x")
     assert draft.status == "error" and "every model failed" in draft.error
+    assert "send a message to retry" in draft.error
 
 
 def test_step_limit_stops_a_looping_model(kit):
@@ -326,3 +327,48 @@ def test_dry_run_can_start_from_a_given_state(kit):
     assert [c["state"] for c in execute.calls] == [{"last": ["3.14"]}]
     bad = gemini.requests[3][1]["contents"][-1]["parts"][0]["functionResponse"]["response"]
     assert "state_json is not valid JSON" in bad["error"]
+
+
+def test_approve_saves_a_checkpoint_first(kit, paths, repo):
+    make, store, _ = kit
+    builder, _ = make(*HAPPY_PATH)
+    made = []
+    builder._checkpoint = lambda comment: made.append(comment) or "v7"
+    draft = builder.start("x")
+    builder.approve(draft.id)
+    assert made == ["before install of hello-mail"]
+    steps = [t["text"] for t in store.load(draft.id).transcript if t["role"] == "step"]
+    assert "Saved checkpoint v7 (undo point)" in steps
+
+
+def test_a_failed_checkpoint_does_not_block_the_install(kit, repo):
+    make, store, _ = kit
+    builder, _ = make(*HAPPY_PATH)
+
+    def broken(comment):
+        raise OSError("no socket")
+
+    builder._checkpoint = broken
+    draft = builder.start("x")
+    assert builder.approve(draft.id).id == "hello-mail"
+    assert any("Could not save a checkpoint" in t["text"] for t in store.load(draft.id).transcript)
+
+
+def test_edit_of_a_deleted_automation_cannot_be_approved(kit, repo, paths):
+    from tests.test_db import make as make_automation
+
+    make, store, _ = kit
+    repo.save_automation(make_automation("hello-mail"))
+    paths.automation_dir("hello-mail").mkdir(parents=True)
+    (paths.automation_dir("hello-mail") / "main.py").write_text("print(1)\n")
+    builder, _ = make(*HAPPY_PATH[1:])
+    draft = builder.start_edit("hello-mail", "change it")
+    assert store.files(draft.id) == {"main.py": HELLO}
+    assert builder.open_draft("hello-mail", "change").id == draft.id
+    repo.delete_automation("hello-mail")
+    with pytest.raises(BuilderError, match="was deleted"):
+        builder.approve(draft.id)
+    builder.discard(draft.id)
+    assert builder.open_draft("hello-mail", "change") is None
+    with pytest.raises(BuilderError):
+        builder.start_edit("hello-mail", "x")

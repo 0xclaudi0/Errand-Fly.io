@@ -1,17 +1,14 @@
 """HTTP layer. The only service on the Sprite with an HTTP port.
 
-    GET  /healthz                         open
-    GET  /                                open, no data
-    GET|POST /tick                        X-Errand-Token or ?token=  (tick token)
-    POST /hooks/<hook_id>                 the hook id is the secret
-    GET  /api/automations                 Authorization: Bearer <admin token>
-    GET  /api/automations/<id>/runs       admin
-    POST /api/automations/<id>/run        admin
-    GET  /api/drafts                      admin: builder drafts, newest first
-    POST /api/drafts                      admin: {"message"} starts a draft (202)
-    GET  /api/drafts/<id>                 admin: transcript, files, proposal, status
-    POST /api/drafts/<id>/messages        admin: {"message"} continues a draft (202)
-    POST /api/drafts/<id>/approve         admin: install the proposal
+    GET  /healthz                 open
+    GET  /, /static/<file>        open: the web UI (it asks the API who you are)
+    GET  /login?code=...          one-time login link -> session cookie
+    POST /logout                  end the session
+    GET|POST /tick                X-Errand-Token or ?token=  (tick token)
+    POST /hooks/<hook_id>         the hook id is the secret
+    /api/...                      admin: Bearer <admin token>, or the session cookie
+                                  (a cookie request that changes data also needs the
+                                  header X-Errand-Client, which a cross-site form cannot set)
 """
 
 from __future__ import annotations
@@ -20,20 +17,29 @@ import hmac
 import json
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import parse_qs, urlsplit
 
-from .builder import BuilderError
+from .auth import COOKIE, cookie_value, session_cookie
 from .config import MAX_BODY_BYTES, Secrets
 from .db import Repository
-from .drafts import public_view, summary_view
 
 log = logging.getLogger(__name__)
 
 DISCARD_LIMIT_BYTES = 10 * MAX_BODY_BYTES
-HOME_PAGE = b"<!doctype html><title>Errand</title><p>errand-server is running.</p>"
+STATIC_DIR = Path(__file__).resolve().parent / "static"
+STATIC_FILES = {
+    "index.html": "text/html; charset=utf-8",
+    "app.js": "text/javascript; charset=utf-8",
+    "app.css": "text/css; charset=utf-8",
+    "icon.svg": "image/svg+xml",
+}
+CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
+       "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+CLIENT_HEADER = "X-Errand-Client"
 
 
 class HttpError(Exception):
@@ -50,6 +56,10 @@ class App:
     secrets: Secrets
     builder: Any = None  # Builder, or a fake in tests
     drafts: Any = None  # DraftStore
+    auth: Any = None  # Auth
+    paths: Any = None  # Paths
+    sprite: Any = None  # SpriteApi
+    base_url: Callable[[], str] = field(default=lambda: "")
 
 
 @dataclass(frozen=True)
@@ -61,20 +71,61 @@ class Request:
     read_body: Callable[[], bytes]
 
 
+@dataclass(frozen=True)
+class Raw:
+    """A response that is not the JSON envelope: a page, a file, or a redirect."""
+    status: int
+    body: bytes
+    content_type: str
+    headers: tuple[tuple[str, str], ...] = ()
+
+
 Response = tuple[int, Any]
 
 
-def route(app: App, req: Request) -> Response:
+def route(app: App, req: Request) -> Response | Raw:
     if req.path == "/healthz":
         return 200, "ok"
+    if req.method == "GET" and (req.path == "/" or req.path.startswith("/static/")):
+        return static_file("index.html" if req.path == "/" else req.path[len("/static/"):])
+    if req.path == "/login" and req.method == "GET":
+        return login(app, req)
+    if req.path == "/logout" and req.method == "POST":
+        return logout(app, req)
     if req.path == "/tick" and req.method in ("GET", "POST"):
         return tick(app, req)
     hook = re.fullmatch(r"/hooks/([A-Za-z0-9_-]{8,64})", req.path)
     if hook and req.method == "POST":
         return webhook(app, req, hook.group(1))
     if req.path.startswith("/api/"):
-        return api(app, req)
+        authorize_api(app, req)
+        from .api_routes import handle  # late import: api_routes imports this module
+
+        return handle(app, req)
     raise HttpError(404, "not found")
+
+
+def static_file(name: str) -> Raw:
+    content_type = STATIC_FILES.get(name)
+    if content_type is None:
+        raise HttpError(404, "not found")
+    return Raw(200, (STATIC_DIR / name).read_bytes(), content_type)
+
+
+def login(app: App, req: Request) -> Raw:
+    code = (req.query.get("code") or [""])[0]
+    token = app.auth.redeem(code) if app.auth else None
+    if token is None:
+        return Raw(303, b"", "text/plain", (("Location", "/?login=expired"),))
+    return Raw(303, b"", "text/plain",
+               (("Location", "/"), ("Set-Cookie", session_cookie(token))))
+
+
+def logout(app: App, req: Request) -> Raw:
+    _require_client_header(req)
+    if app.auth:
+        app.auth.end_session(cookie_value(req.headers.get("Cookie")))
+    return Raw(204, b"", "text/plain", (("Set-Cookie", session_cookie("", max_age=0)),))
 
 
 def tick(app: App, req: Request) -> Response:
@@ -92,69 +143,21 @@ def webhook(app: App, req: Request, hook_id: str) -> Response:
     return 202, {"accepted": automation.id}
 
 
-def api(app: App, req: Request) -> Response:
-    auth = req.headers.get("Authorization", "")
-    _require(auth.removeprefix("Bearer ").strip(), app.secrets.admin_token)
-    if req.path == "/api/automations" and req.method == "GET":
-        return 200, [a.to_dict() for a in app.repo.list_automations()]
-    if req.path.startswith("/api/drafts"):
-        try:
-            return drafts_api(app, req)
-        except BuilderError as err:
-            raise HttpError(err.status, err.message) from err
-    match = re.fullmatch(r"/api/automations/([a-z0-9-]+)/(runs|run)", req.path)
-    if not match:
-        raise HttpError(404, "not found")
-    automation = app.repo.get_automation(match.group(1))
-    if automation is None:
-        raise HttpError(404, "no such automation")
-    if match.group(2) == "runs" and req.method == "GET":
-        return 200, [r.to_dict() for r in app.repo.list_runs(automation.id)]
-    if match.group(2) == "run" and req.method == "POST":
-        app.dispatcher.submit(automation, "manual")
-        return 202, {"accepted": automation.id}
-    raise HttpError(405, "method not allowed")
+def authorize_api(app: App, req: Request) -> None:
+    bearer = req.headers.get("Authorization", "").removeprefix("Bearer ").strip()
+    if bearer:
+        _require(bearer, app.secrets.admin_token)
+        return
+    if app.auth and app.auth.is_session(cookie_value(req.headers.get("Cookie"))):
+        if req.method != "GET":
+            _require_client_header(req)
+        return
+    raise HttpError(401, "unauthorized")
 
 
-def drafts_api(app: App, req: Request) -> Response:
-    if app.builder is None:
-        raise HttpError(503, "the builder is not available")
-    if req.path == "/api/drafts":
-        if req.method == "GET":
-            return 200, [summary_view(d) for d in app.drafts.list()]
-        if req.method == "POST":
-            draft = app.builder.start(_json_body(req).get("message"))
-            return 202, {"id": draft.id, "status": draft.status}
-        raise HttpError(405, "method not allowed")
-    match = re.fullmatch(r"/api/drafts/(d-[0-9a-f]{8})(?:/(messages|approve))?", req.path)
-    if not match:
-        raise HttpError(404, "not found")
-    draft_id, action = match.groups()
-    if action is None and req.method == "GET":
-        draft = app.drafts.load(draft_id)
-        if draft is None:
-            raise HttpError(404, "no such draft")
-        return 200, public_view(draft, app.drafts.files(draft_id))
-    if action == "messages" and req.method == "POST":
-        draft = app.builder.send(draft_id, _json_body(req).get("message"))
-        return 202, {"id": draft.id, "status": draft.status}
-    if action == "approve" and req.method == "POST":
-        automation = app.builder.approve(draft_id)
-        data = automation.to_dict()
-        if automation.hook_id:
-            data["hook_path"] = f"/hooks/{automation.hook_id}"
-        return 200, data
-    raise HttpError(405, "method not allowed")
-
-
-def _json_body(req: Request) -> dict:
-    try:
-        data = json.loads(req.read_body() or b"{}")
-    except (json.JSONDecodeError, UnicodeDecodeError) as err:
-        raise HttpError(400, "body must be JSON") from err
-    if not isinstance(data, dict):
-        raise HttpError(400, "body must be a JSON object")
-    return data
+def _require_client_header(req: Request) -> None:
+    if req.headers.get(CLIENT_HEADER) != "web":
+        raise HttpError(403, f"missing {CLIENT_HEADER} header")
 
 
 def _require(given: str, expected: str) -> None:
@@ -182,21 +185,26 @@ def make_handler(app: App) -> type[BaseHTTPRequestHandler]:
         def do_POST(self) -> None:  # noqa: N802
             self._handle("POST")
 
+        def do_DELETE(self) -> None:  # noqa: N802
+            self._handle("DELETE")
+
         def _handle(self, method: str) -> None:
             url = urlsplit(self.path)
-            if url.path == "/" and method == "GET":
-                self._send(200, HOME_PAGE, "text/html; charset=utf-8")
-                return
             req = Request(method, url.path, parse_qs(url.query), self.headers, self._read_body)
             try:
-                status, data = route(app, req)
-                body = {"ok": True, "data": data, "error": None}
+                result = route(app, req)
             except HttpError as err:
-                status, body = err.status, {"ok": False, "data": None, "error": err.message}
+                result = (err.status, None, err.message)
             except Exception:
                 log.exception("unhandled error on %s %s", method, url.path)
-                status, body = 500, {"ok": False, "data": None, "error": "internal error"}
-            self._send(status, json.dumps(body).encode(), "application/json")
+                result = (500, None, "internal error")
+            if isinstance(result, Raw):
+                self._send(result.status, result.body, result.content_type, result.headers)
+                return
+            status, data, *error = result
+            body = {"ok": not error, "data": data, "error": error[0] if error else None}
+            self._send(status, json.dumps(body).encode(), "application/json",
+                       (("Cache-Control", "no-store"),))
 
         def _read_body(self) -> bytes:
             length = int(self.headers.get("Content-Length") or 0)
@@ -214,10 +222,19 @@ def make_handler(app: App) -> type[BaseHTTPRequestHandler]:
                     break
                 left -= len(chunk)
 
-        def _send(self, status: int, body: bytes, content_type: str) -> None:
+        def _send(self, status: int, body: bytes, content_type: str,
+                  headers: tuple[tuple[str, str], ...] = ()) -> None:
             self.send_response(status)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Referrer-Policy", "no-referrer")
+            if content_type.startswith("text/html"):
+                self.send_header("Content-Security-Policy", CSP)
+            if not content_type.startswith("application/json"):
+                self.send_header("Cache-Control", "no-cache")  # a deploy must show at once
+            for name, value in headers:
+                self.send_header(name, value)
             if status == 413:
                 self.send_header("Connection", "close")
             self.end_headers()
@@ -232,3 +249,6 @@ def make_handler(app: App) -> type[BaseHTTPRequestHandler]:
 
 def make_server(app: App, host: str, port: int) -> ThreadingHTTPServer:
     return ThreadingHTTPServer((host, port), make_handler(app))
+
+
+__all__ = ["App", "COOKIE", "HttpError", "Raw", "Request", "make_server", "route"]
