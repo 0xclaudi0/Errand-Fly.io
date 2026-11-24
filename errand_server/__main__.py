@@ -7,6 +7,8 @@
     set KEY VALUE                  change a setting (notify_email, email_from, timezone, auto_repair)
     login-link                     print a one-time link that logs a browser in (10 minutes)
     egress [--allow HOST]          print the network policy Errand needs (scripts/egress.sh applies it)
+    connectors                     list the connector providers this Sprite can use (fresh)
+    tick-info                      print the URL and header a scheduler must call
     build MESSAGE [--draft ID]     ask the builder agent for an automation (or continue a draft)
     approve DRAFT                  install the draft's tested proposal
     drafts                         list builder drafts
@@ -156,6 +158,23 @@ def cmd_egress(args, paths, repo) -> int:
     return 0
 
 
+def cmd_connectors(args, paths, repo) -> int:
+    (paths.home / "connections.json").unlink(missing_ok=True)  # read the gateway list again
+    try:
+        print(" ".join(gateway.providers()))
+    except Exception as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_tick_info(args, paths, repo) -> int:
+    base = sprite_url(SpriteApi()) or "https://<your-sprite-url>"
+    print(f"URL:    {base.rstrip('/')}/tick")
+    print(f"Header: X-Errand-Token: {load_or_create_secrets(paths).tick_token}")
+    return 0
+
+
 def cmd_login_link(args, paths, repo) -> int:
     code = Auth(paths.auth).new_login_code()
     base = sprite_url(SpriteApi()) or "http://localhost:8080"
@@ -256,6 +275,8 @@ def _parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_set)
 
     sub.add_parser("login-link").set_defaults(func=cmd_login_link)
+    sub.add_parser("connectors").set_defaults(func=cmd_connectors)
+    sub.add_parser("tick-info").set_defaults(func=cmd_tick_info)
     p = sub.add_parser("egress")
     p.add_argument("--allow", action="append", metavar="HOST")
     p.set_defaults(func=cmd_egress)
