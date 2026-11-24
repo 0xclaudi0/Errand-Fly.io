@@ -238,3 +238,11 @@ def test_checkpoints_list_create_and_restore(site):
     assert site.call("POST", "/api/checkpoints/v2/restore", {}, BEARER)[0] == 202
     assert site.sprite.restored == ["v2"]
     assert site.call("POST", "/api/checkpoints/latest/restore", {}, BEARER)[0] == 404
+
+
+def test_egress_status_route(site, paths):
+    folder = paths.automation_dir("w")
+    folder.mkdir(parents=True)
+    (folder / "main.py").write_text('URL = "https://wttr.in/x"\n')
+    data = site.call("GET", "/api/egress", headers=BEARER)[1]["data"]
+    assert data["wanted"] == ["wttr.in"] and data["mode"] in ("open", "locked")

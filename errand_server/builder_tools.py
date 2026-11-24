@@ -6,7 +6,9 @@ import json
 import time
 from typing import Any, Callable
 
-from . import codecheck
+from urllib.parse import urlsplit
+
+from . import codecheck, egress
 from .config import MAX_TIMEOUT_S, Paths
 from .db import Repository
 from .drafts import Draft, DraftStore
@@ -94,7 +96,12 @@ class Toolbox:
         url = str(args.get("url", ""))
         if not url.startswith(("https://", "http://")):
             return draft, {"error": "url must start with https:// or http://"}
-        text = self._fetch(url)
+        try:
+            text = self._fetch(url)
+        except Exception as err:
+            result = {"error": f"{type(err).__name__}: {err}"}
+            hint = egress.dns_hint(str(err), urlsplit(url).hostname)
+            return draft, {**result, "hint": hint} if hint else result
         draft = draft.note("step", f"Looked at {url[:120]}")
         return draft, {"length": len(text), "start": text[:PEEK_CHARS]}
 
@@ -141,7 +148,9 @@ class Toolbox:
         word = {"ok": "passed", "timeout": "timed out"}.get(outcome.status, "failed")
         draft = draft.note("step", f"Dry run {run_no} {word} in {seconds} s",
                            dry_runs=draft.dry_runs + (record,), tested=outcome.status == "ok")
-        return draft, {k: record[k] for k in ("status", "exit_code", "seconds", "output")}
+        result = {k: record[k] for k in ("status", "exit_code", "seconds", "output")}
+        hint = egress.dns_hint(outcome.output) if outcome.status != "ok" else None
+        return draft, {**result, "hint": hint} if hint else result
 
     def _tool_propose(self, draft: Draft, args: dict) -> Result:
         if not draft.tested:

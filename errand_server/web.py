@@ -60,6 +60,7 @@ class App:
     paths: Any = None  # Paths
     sprite: Any = None  # SpriteApi
     base_url: Callable[[], str] = field(default=lambda: "")
+    egress_policy: Callable[[], Any] = field(default=lambda: None)  # the active Sprite policy
 
 
 @dataclass(frozen=True)

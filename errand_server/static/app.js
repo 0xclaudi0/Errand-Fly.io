@@ -458,8 +458,8 @@ function versionsTable(a) {
 // ---- settings --------------------------------------------------------------
 
 async function showSettings() {
-  const [session, checkpoints] = await Promise.all([
-    api("/api/session"), api("/api/checkpoints").catch(() => []),
+  const [session, checkpoints, network] = await Promise.all([
+    api("/api/session"), api("/api/checkpoints").catch(() => []), api("/api/egress").catch(() => null),
   ]);
   document.getElementById("nav").hidden = false;
   const s = session.settings;
@@ -490,6 +490,7 @@ async function showSettings() {
   show(
     h("h1", {}, "Settings"),
     form,
+    network && networkSection(network),
     h("h2", {}, "Checkpoints"),
     h("p", { class: "lede" }, "Errand saves a checkpoint of the whole Sprite before each install, update and delete. A restore puts every errand, run and setting back to that moment, and restarts the Sprite."),
     checkpointsTable(checkpoints),
@@ -501,6 +502,26 @@ async function showSettings() {
       },
     }, "Log out"),
   );
+}
+
+function networkSection(network) {
+  const sites = network.wanted.length ? network.wanted.join(", ") : "none yet";
+  const command = network.blocked.length
+    ? `scripts/egress.sh allow ${network.blocked.join(" ")}` : "scripts/egress.sh sync";
+  return [
+    h("h2", {}, "Network"),
+    h("div", { class: "card" },
+      h("p", {}, status({ open: ["Open", "idle"], locked: ["Locked", "done"] }, network.mode),
+        "  ", network.mode === "open"
+          ? "Errands can reach any site."
+          : "Errands can reach the platform, your connectors and the allowed sites only."),
+      h("p", { class: "muted small" }, `Sites your errands use: ${sites}.`),
+      network.blocked.length > 0 && h("div", { class: "notice bad" },
+        h("p", {}, `The policy blocks ${network.blocked.join(", ")}. Errands that use them will fail.`)),
+      h("p", { class: "caption", style: "margin-top:12px" },
+        "The Sprite cannot change its own network policy. To lock it or allow a site, run this in the errand folder on your computer:"),
+      h("pre", {}, command)),
+  ];
 }
 
 function checkpointsTable(checkpoints) {

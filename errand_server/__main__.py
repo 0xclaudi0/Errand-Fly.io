@@ -6,6 +6,7 @@
     list                           list automations and their last run
     set KEY VALUE                  change a setting (notify_email, email_from, timezone, auto_repair)
     login-link                     print a one-time link that logs a browser in (10 minutes)
+    egress [--allow HOST]          print the network policy Errand needs (scripts/egress.sh applies it)
     build MESSAGE [--draft ID]     ask the builder agent for an automation (or continue a draft)
     approve DRAFT                  install the draft's tested proposal
     drafts                         list builder drafts
@@ -24,7 +25,7 @@ from pathlib import Path
 
 from errand_sdk import gateway, send_email, web as sdk_web
 
-from . import runner, settings
+from . import egress, runner, settings
 from .auth import Auth
 from .builder import Builder, BuilderError
 from .builder_tools import Toolbox
@@ -90,7 +91,8 @@ def cmd_serve(args, paths, repo) -> int:
                         notify=send_email, base_url=lambda: base)
     dispatcher = Dispatcher(repo, paths, on_failure=repairer.on_failure)
     app = App(repo, dispatcher, load_or_create_secrets(paths), builder, store,
-              auth=Auth(paths.auth), paths=paths, sprite=sprite, base_url=lambda: base)
+              auth=Auth(paths.auth), paths=paths, sprite=sprite, base_url=lambda: base,
+              egress_policy=egress.active_policy)
     port = int(os.environ.get("PORT", DEFAULT_PORT))
     log.info("errand-server listening on :%d, home %s", port, paths.home)
     make_server(app, "0.0.0.0", port).serve_forever()
@@ -140,6 +142,17 @@ def cmd_set(args, paths, repo) -> int:
         print(f"error: {err}", file=sys.stderr)
         return 1
     print(f"{args.key} set")
+    return 0
+
+
+def cmd_egress(args, paths, repo) -> int:
+    try:
+        for host in args.allow or []:
+            egress.allow(paths, host)
+    except ValueError as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+    print(json.dumps(egress.wanted_policy(paths)))
     return 0
 
 
@@ -243,6 +256,9 @@ def _parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_set)
 
     sub.add_parser("login-link").set_defaults(func=cmd_login_link)
+    p = sub.add_parser("egress")
+    p.add_argument("--allow", action="append", metavar="HOST")
+    p.set_defaults(func=cmd_egress)
 
     p = sub.add_parser("build")
     p.add_argument("message")

@@ -10,6 +10,7 @@
     POST   /api/automations/<id>/enabled         {"enabled": bool}
     POST   /api/automations/<id>/rollback        {"version": sha}
     POST   /api/automations/<id>/edit            {"message", "run_id"?, "kind"?} -> draft (202)
+    GET    /api/egress                           network policy: open or locked, hosts it blocks
     GET    /api/checkpoints | POST {"comment"}   Sprite checkpoints
     POST   /api/checkpoints/<id>/restore         restore the whole Sprite (it restarts)
     GET    /api/drafts | POST {"message"}        builder drafts
@@ -25,7 +26,7 @@ import shutil
 import time
 from typing import Any
 
-from . import history, settings
+from . import egress, history, settings
 from .builder import BuilderError
 from .drafts import public_view, summary_view
 from .schedule import next_run, parse_schedule
@@ -57,6 +58,8 @@ def _dispatch(app: App, req: Request) -> Response:
             return 200, settings.update(app.paths.settings, _json_body(req))
     if path == "/api/automations" and method == "GET":
         return 200, [_summary(app, a) for a in app.repo.list_automations()]
+    if path == "/api/egress" and method == "GET":
+        return 200, egress.status(app.paths, app.egress_policy())
     match = AUTOMATION.fullmatch(path)
     if match:
         return automation_api(app, req, *match.groups())

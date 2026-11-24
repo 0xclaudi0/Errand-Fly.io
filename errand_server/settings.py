@@ -8,7 +8,8 @@ from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 EMAIL = re.compile(r"^[^@\s]{1,64}@[^@\s]{1,190}\.[A-Za-z]{2,24}$")
-KEYS = ("notify_email", "email_from", "timezone", "auto_repair")
+KEYS = ("notify_email", "email_from", "timezone", "auto_repair", "egress_allow")
+HOST = re.compile(r"^(?:\*\.)?[a-z0-9-]+(?:\.[a-z0-9-]+)+$")
 
 
 def load(path: Path) -> dict:
@@ -44,4 +45,6 @@ def check(key: str, value: object) -> str:
             raise ValueError(f"unknown timezone {value!r}") from err
     if key == "auto_repair" and value not in ("on", "off"):
         raise ValueError("auto_repair must be on or off")
+    if key == "egress_allow" and value and not all(HOST.fullmatch(h) for h in value.split(",")):
+        raise ValueError("egress_allow must be host names separated by commas")
     return value

@@ -66,6 +66,8 @@ Rules:
 - Automation ids are short lowercase slugs, for example "hn-digest".
 - In propose, `services` lists connector names and site domains, for example
   ["resend", "wttr.in"].
+- If a tool result has a "hint" about the network policy, a site is blocked. Do not
+  look for another way around it. Tell the owner the exact command in the hint, and stop.
 - If you cannot do it with the connected services, say so plainly and suggest which
   connector the owner can add in the Sprites dashboard.
 
