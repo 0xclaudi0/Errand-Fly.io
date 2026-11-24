@@ -4,7 +4,11 @@
     install DIR --id ID --name N   install DIR/main.py (--schedule SPEC | --webhook | --manual)
     run ID                         run one automation now and print the result
     list                           list automations and their last run
-    set KEY VALUE                  change a setting (notify_email, email_from)
+    set KEY VALUE                  change a setting (notify_email, email_from, timezone)
+    build MESSAGE [--draft ID]     ask the builder agent for an automation (or continue a draft)
+    approve DRAFT                  install the draft's tested proposal
+    drafts                         list builder drafts
+    show DRAFT                     print a draft's transcript, proposal and code
 """
 
 from __future__ import annotations
@@ -17,13 +21,19 @@ import sys
 import time
 from pathlib import Path
 
-from .config import DEFAULT_PORT, DEFAULT_TIMEOUT_S, load_or_create_secrets, paths_from_env
+from errand_sdk import gateway, web as sdk_web
+
+from . import runner
+from .builder import Builder, BuilderError
+from .builder_tools import Toolbox
+from .config import DEFAULT_PORT, DEFAULT_TIMEOUT_S, Paths, load_or_create_secrets, paths_from_env
 from .db import Repository
+from .drafts import DraftStore
 from .install import install
 from .jobs import Dispatcher
 from .web import App, make_server
 
-SETTING_KEYS = ("notify_email", "email_from")
+SETTING_KEYS = ("notify_email", "email_from", "timezone")
 
 log = logging.getLogger("errand")
 
@@ -38,11 +48,28 @@ def main(argv: list[str] | None = None) -> int:
     return args.func(args, paths, repo)
 
 
+def make_builder(paths: Paths, repo: Repository, background: bool) -> tuple[Builder, DraftStore]:
+    store = DraftStore(paths)
+    toolbox = Toolbox(store, paths, repo, execute=runner.execute,
+                      providers=gateway.providers, fetch=sdk_web.fetch_text)
+    builder = Builder(store, paths, repo, toolbox, settings=lambda: _settings(paths),
+                      background=background)
+    return builder, store
+
+
+def _settings(paths: Paths) -> dict:
+    return json.loads(paths.settings.read_text()) if paths.settings.exists() else {}
+
+
 def cmd_serve(args, paths, repo) -> int:
     closed = repo.mark_interrupted(time.time())
     if closed:
         log.warning("closed %d run(s) that a restart interrupted", closed)
-    app = App(repo, Dispatcher(repo, paths), load_or_create_secrets(paths))
+    builder, store = make_builder(paths, repo, background=True)
+    stuck = builder.recover()
+    if stuck:
+        log.warning("marked %d builder draft(s) that a restart interrupted", stuck)
+    app = App(repo, Dispatcher(repo, paths), load_or_create_secrets(paths), builder, store)
     port = int(os.environ.get("PORT", DEFAULT_PORT))
     log.info("errand-server listening on :%d, home %s", port, paths.home)
     make_server(app, "0.0.0.0", port).serve_forever()
@@ -86,10 +113,73 @@ def cmd_list(args, paths, repo) -> int:
 
 
 def cmd_set(args, paths, repo) -> int:
-    settings = json.loads(paths.settings.read_text()) if paths.settings.exists() else {}
-    paths.settings.write_text(json.dumps({**settings, args.key: args.value}, indent=2))
+    paths.settings.write_text(json.dumps({**_settings(paths), args.key: args.value}, indent=2))
     print(f"{args.key} set")
     return 0
+
+
+def cmd_build(args, paths, repo) -> int:
+    builder, store = make_builder(paths, repo, background=False)
+    before = len(store.load(args.draft).transcript) if args.draft and store.load(args.draft) else 0
+    try:
+        draft = builder.send(args.draft, args.message) if args.draft else builder.start(args.message)
+    except BuilderError as err:
+        print(f"error: {err.message}", file=sys.stderr)
+        return 1
+    for entry in draft.transcript[before:]:
+        print(_line(entry))
+    _print_outcome(draft)
+    return 0 if draft.status in ("waiting", "proposed") else 1
+
+
+def cmd_approve(args, paths, repo) -> int:
+    builder, _ = make_builder(paths, repo, background=False)
+    try:
+        automation = builder.approve(args.draft)
+    except BuilderError as err:
+        print(f"error: {err.message}", file=sys.stderr)
+        return 1
+    print(f"installed {automation.id} ({automation.schedule or automation.trigger})")
+    if automation.hook_id:
+        print(f"webhook path: /hooks/{automation.hook_id}")
+    return 0
+
+
+def cmd_drafts(args, paths, repo) -> int:
+    for draft in DraftStore(paths).list():
+        first = next((t["text"] for t in draft.transcript if t["role"] == "user"), "")
+        print(f"{draft.id}  {draft.status:9} {first[:70]}")
+    return 0
+
+
+def cmd_show(args, paths, repo) -> int:
+    store = DraftStore(paths)
+    draft = store.load(args.draft)
+    if draft is None:
+        print("no such draft", file=sys.stderr)
+        return 2
+    for entry in draft.transcript:
+        print(_line(entry))
+    _print_outcome(draft)
+    for name, code in store.files(draft.id).items():
+        print(f"\n===== {name}\n{code}")
+    return 0
+
+
+def _line(entry: dict) -> str:
+    label = {"user": "you", "agent": "errand", "step": "  ·"}[entry["role"]]
+    return f"{label}: {entry['text']}" if entry["role"] != "step" else f"{label} {entry['text']}"
+
+
+def _print_outcome(draft) -> None:
+    if draft.dry_runs:
+        last = draft.dry_runs[-1]
+        print(f"\n--- last dry run ({last['status']}, {last['seconds']} s):\n{last['output'].strip()}")
+    if draft.proposal:
+        print("\n--- proposal:\n" + json.dumps(draft.proposal, indent=2))
+    if draft.error:
+        print(f"\n--- error: {draft.error}")
+    print(f"\n[{draft.id}] status: {draft.status}")
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -118,6 +208,18 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("key", choices=SETTING_KEYS)
     p.add_argument("value")
     p.set_defaults(func=cmd_set)
+
+    p = sub.add_parser("build")
+    p.add_argument("message")
+    p.add_argument("--draft")
+    p.set_defaults(func=cmd_build)
+    p = sub.add_parser("approve")
+    p.add_argument("draft")
+    p.set_defaults(func=cmd_approve)
+    sub.add_parser("drafts").set_defaults(func=cmd_drafts)
+    p = sub.add_parser("show")
+    p.add_argument("draft")
+    p.set_defaults(func=cmd_show)
     return parser
 
 

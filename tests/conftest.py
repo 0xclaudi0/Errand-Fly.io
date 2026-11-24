@@ -22,3 +22,11 @@ def repo(paths: Paths) -> Repository:
     r = Repository(paths.db)
     r.init_schema()
     return r
+
+
+@pytest.fixture(autouse=True)
+def fresh_model_health(monkeypatch):
+    """ask_llm() keeps a process-wide record of failed models; start each test clean."""
+    from errand_sdk import llm
+
+    monkeypatch.setattr(llm, "HEALTH", llm.ModelHealth())

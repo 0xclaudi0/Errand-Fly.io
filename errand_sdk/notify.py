@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 
 from . import gateway
+from .runtime import dry_run_note, is_dry_run
 
 DEFAULT_FROM = "Errand <onboarding@resend.dev>"
 
@@ -34,6 +35,10 @@ def send_email(subject: str, text: str, *, to: str | list[str] | None = None,
     }
     if html:
         body["html"] = html
+    if is_dry_run():
+        preview = f"To: {', '.join(body['to'])}\nSubject: {subject}\n\n{text[:3000]}"
+        dry_run_note("Email", preview)
+        return "dry-run"
     url = f"{gateway.base_url('resend')}/emails"
     reply = gateway.request_json("POST", url, body, timeout=30,
                                  headers={"Idempotency-Key": _idempotency_key(subject, text)})

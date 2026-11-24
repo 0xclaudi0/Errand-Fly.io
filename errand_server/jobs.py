@@ -98,18 +98,26 @@ class Dispatcher:
 
     def _env(self, automation: Automation, run_id: int, trigger: str,
              event_file: Path | None) -> dict[str, str]:
-        """Build the script env from scratch, so server secrets never leak in."""
-        env = {k: os.environ[k] for k in PASS_THROUGH_ENV if k in os.environ}
         folder = self._paths.automation_dir(automation.id)
-        env.update(
-            PYTHONPATH=str(SDK_ROOT),
-            PYTHONUNBUFFERED="1",
-            ERRAND_HOME=str(self._paths.home),
-            ERRAND_AUTOMATION_ID=automation.id,
-            ERRAND_RUN_ID=str(run_id),
-            ERRAND_TRIGGER=trigger,
-            ERRAND_STATE_FILE=str(folder / "state.json"),
-        )
-        if event_file:
-            env["ERRAND_EVENT_FILE"] = str(event_file)
-        return env
+        return script_env(self._paths, automation.id, str(run_id), trigger,
+                          folder / "state.json", event_file)
+
+
+def script_env(paths: Paths, automation_id: str, run_id: str, trigger: str,
+               state_file: Path, event_file: Path | None,
+               extra: dict[str, str] | None = None) -> dict[str, str]:
+    """Build the script env from scratch, so server secrets never leak in."""
+    env = {k: os.environ[k] for k in PASS_THROUGH_ENV if k in os.environ}
+    env.update(
+        PYTHONPATH=str(SDK_ROOT),
+        PYTHONUNBUFFERED="1",
+        ERRAND_HOME=str(paths.home),
+        ERRAND_AUTOMATION_ID=automation_id,
+        ERRAND_RUN_ID=run_id,
+        ERRAND_TRIGGER=trigger,
+        ERRAND_STATE_FILE=str(state_file),
+        **(extra or {}),
+    )
+    if event_file:
+        env["ERRAND_EVENT_FILE"] = str(event_file)
+    return env

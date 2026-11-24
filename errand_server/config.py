@@ -34,6 +34,10 @@ class Paths:
         return self.home / "tmp"
 
     @property
+    def drafts(self) -> Path:
+        return self.home / "drafts"
+
+    @property
     def secrets(self) -> Path:
         return self.home / "secrets.json"
 
@@ -45,7 +49,7 @@ class Paths:
         return self.automations / automation_id
 
     def ensure(self) -> None:
-        for folder in (self.home, self.automations, self.tmp):
+        for folder in (self.home, self.automations, self.tmp, self.drafts):
             folder.mkdir(parents=True, exist_ok=True)
 
 

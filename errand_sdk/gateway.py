@@ -52,6 +52,11 @@ def base_url(provider: str) -> str:
     raise GatewayError(404, f"no {provider!r} connector is available to this Sprite")
 
 
+def providers() -> list[str]:
+    """Names of the connector providers this Sprite can use, for example ["gemini", "resend"]."""
+    return sorted({c["provider"] for c in _connections(False) if c.get("provider")})
+
+
 def _connections(refresh: bool) -> list[dict]:
     cache = Path(os.environ.get("ERRAND_HOME", Path.home() / ".errand")) / "connections.json"
     if not refresh and cache.exists():

@@ -7,6 +7,11 @@
     GET  /api/automations                 Authorization: Bearer <admin token>
     GET  /api/automations/<id>/runs       admin
     POST /api/automations/<id>/run        admin
+    GET  /api/drafts                      admin: builder drafts, newest first
+    POST /api/drafts                      admin: {"message"} starts a draft (202)
+    GET  /api/drafts/<id>                 admin: transcript, files, proposal, status
+    POST /api/drafts/<id>/messages        admin: {"message"} continues a draft (202)
+    POST /api/drafts/<id>/approve         admin: install the proposal
 """
 
 from __future__ import annotations
@@ -20,8 +25,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable
 from urllib.parse import parse_qs, urlsplit
 
+from .builder import BuilderError
 from .config import MAX_BODY_BYTES, Secrets
 from .db import Repository
+from .drafts import public_view, summary_view
 
 log = logging.getLogger(__name__)
 
@@ -41,6 +48,8 @@ class App:
     repo: Repository
     dispatcher: Any  # Dispatcher, or a fake in tests
     secrets: Secrets
+    builder: Any = None  # Builder, or a fake in tests
+    drafts: Any = None  # DraftStore
 
 
 @dataclass(frozen=True)
@@ -88,6 +97,11 @@ def api(app: App, req: Request) -> Response:
     _require(auth.removeprefix("Bearer ").strip(), app.secrets.admin_token)
     if req.path == "/api/automations" and req.method == "GET":
         return 200, [a.to_dict() for a in app.repo.list_automations()]
+    if req.path.startswith("/api/drafts"):
+        try:
+            return drafts_api(app, req)
+        except BuilderError as err:
+            raise HttpError(err.status, err.message) from err
     match = re.fullmatch(r"/api/automations/([a-z0-9-]+)/(runs|run)", req.path)
     if not match:
         raise HttpError(404, "not found")
@@ -100,6 +114,47 @@ def api(app: App, req: Request) -> Response:
         app.dispatcher.submit(automation, "manual")
         return 202, {"accepted": automation.id}
     raise HttpError(405, "method not allowed")
+
+
+def drafts_api(app: App, req: Request) -> Response:
+    if app.builder is None:
+        raise HttpError(503, "the builder is not available")
+    if req.path == "/api/drafts":
+        if req.method == "GET":
+            return 200, [summary_view(d) for d in app.drafts.list()]
+        if req.method == "POST":
+            draft = app.builder.start(_json_body(req).get("message"))
+            return 202, {"id": draft.id, "status": draft.status}
+        raise HttpError(405, "method not allowed")
+    match = re.fullmatch(r"/api/drafts/(d-[0-9a-f]{8})(?:/(messages|approve))?", req.path)
+    if not match:
+        raise HttpError(404, "not found")
+    draft_id, action = match.groups()
+    if action is None and req.method == "GET":
+        draft = app.drafts.load(draft_id)
+        if draft is None:
+            raise HttpError(404, "no such draft")
+        return 200, public_view(draft, app.drafts.files(draft_id))
+    if action == "messages" and req.method == "POST":
+        draft = app.builder.send(draft_id, _json_body(req).get("message"))
+        return 202, {"id": draft.id, "status": draft.status}
+    if action == "approve" and req.method == "POST":
+        automation = app.builder.approve(draft_id)
+        data = automation.to_dict()
+        if automation.hook_id:
+            data["hook_path"] = f"/hooks/{automation.hook_id}"
+        return 200, data
+    raise HttpError(405, "method not allowed")
+
+
+def _json_body(req: Request) -> dict:
+    try:
+        data = json.loads(req.read_body() or b"{}")
+    except (json.JSONDecodeError, UnicodeDecodeError) as err:
+        raise HttpError(400, "body must be JSON") from err
+    if not isinstance(data, dict):
+        raise HttpError(400, "body must be a JSON object")
+    return data
 
 
 def _require(given: str, expected: str) -> None:
