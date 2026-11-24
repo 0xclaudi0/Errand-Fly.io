@@ -41,7 +41,11 @@ async function api(path, options = {}) {
   let payload = null;
   try { payload = await resp.json(); } catch (_) { /* empty or not JSON */ }
   if (resp.status === 401) { showLogin(); throw new Error("Log in first."); }
-  if (!resp.ok) throw new Error((payload && payload.error) || `Request failed (${resp.status})`);
+  if (!resp.ok) {
+    const err = new Error((payload && payload.error) || `Request failed (${resp.status})`);
+    err.status = resp.status;
+    throw err;
+  }
   return payload ? payload.data : null;
 }
 
@@ -153,12 +157,33 @@ function showLogin() {
   document.getElementById("nav").hidden = true;
   const expired = new URLSearchParams(location.search).get("login") === "expired";
   const command = "sprite exec -- sh -c 'cd ~/errand && ERRAND_HOME=~/.errand python3 -m errand_server login-link'";
+  const result = h("p", { class: "caption", role: "status", style: "margin-top:12px" });
+  const other = h("details", { class: "fold" },
+    h("summary", {}, "Other ways to log in"),
+    h("p", { class: "muted small", style: "margin-top:12px" },
+      "Run this on your computer. It uses your own Sprite login and prints a one-time link:"),
+    h("pre", {}, command));
+  const button = h("button", { class: "primary" }, "Email me a login link");
+  button.addEventListener("click", async () => {
+    setBusy(button, true, "Sending");
+    try {
+      const sent = await api("/login/email", { method: "POST", body: {} });
+      result.textContent = `Sent to ${sent.sent_to}. Open the link in this browser. It works once, for 15 minutes.`;
+      setBusy(button, false, "Send another link");
+    } catch (err) {
+      result.textContent = err.message;
+      other.open = err.status !== 429; // a rate limit only means "wait"; email still works
+      setBusy(button, false, "Email me a login link");
+    }
+  });
   show(
-    h("h1", {}, "Log in to Errand"),
-    expired && h("div", { class: "notice bad" }, h("p", {}, "That link expired or was already used. Make a new one.")),
-    h("p", { class: "lede" }, "Errand has no password. Run this on your computer to get a one-time login link:"),
-    h("pre", {}, command),
-    h("p", { class: "caption", style: "margin-top:12px" }, "The link works once and expires after 10 minutes."),
+    h("section", { class: "hero" },
+      h("h1", { class: "display" }, "Log in to Errand"),
+      h("p", { class: "lede" }, "Errand has no password. It emails a one-time link to the address in your settings."),
+      expired && h("div", { class: "notice bad", style: "text-align:left" },
+        h("p", {}, "That link expired or was already used. Ask for a new one.")),
+      h("div", { class: "card", style: "max-width:520px;margin:0 auto;text-align:left;padding:24px" },
+        button, result, other)),
   );
 }
 

@@ -3,6 +3,7 @@
     GET  /healthz                 open
     GET  /, /static/<file>        open: the web UI (it asks the API who you are)
     GET  /login?code=...          one-time login link -> session cookie
+    POST /login/email             email a login link to the owner (rate limited)
     POST /logout                  end the session
     GET|POST /tick                X-Errand-Token or ?token=  (tick token)
     POST /hooks/<hook_id>         the hook id is the secret
@@ -23,7 +24,8 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import parse_qs, urlsplit
 
-from .auth import COOKIE, cookie_value, session_cookie
+from . import settings
+from .auth import COOKIE, EMAIL_CODE_TTL_S, cookie_value, session_cookie
 from .config import MAX_BODY_BYTES, Secrets
 from .db import Repository
 
@@ -61,6 +63,7 @@ class App:
     sprite: Any = None  # SpriteApi
     base_url: Callable[[], str] = field(default=lambda: "")
     egress_policy: Callable[[], Any] = field(default=lambda: None)  # the active Sprite policy
+    notify: Any = None  # send_email(subject, text, to=...), for login links
 
 
 @dataclass(frozen=True)
@@ -91,6 +94,8 @@ def route(app: App, req: Request) -> Response | Raw:
         return static_file("index.html" if req.path == "/" else req.path[len("/static/"):])
     if req.path == "/login" and req.method == "GET":
         return login(app, req)
+    if req.path == "/login/email" and req.method == "POST":
+        return email_login(app, req)
     if req.path == "/logout" and req.method == "POST":
         return logout(app, req)
     if req.path == "/tick" and req.method in ("GET", "POST"):
@@ -120,6 +125,42 @@ def login(app: App, req: Request) -> Raw:
         return Raw(303, b"", "text/plain", (("Location", "/?login=expired"),))
     return Raw(303, b"", "text/plain",
                (("Location", "/"), ("Set-Cookie", session_cookie(token))))
+
+
+LOGIN_EMAIL = """Open this link to log in to Errand. It works once, for 15 minutes:
+
+{link}
+
+If you did not ask for this, ignore this email. Nobody can use the link without
+access to your inbox."""
+
+
+def email_login(app: App, req: Request) -> Response:
+    """Email a one-time login link to notify_email. Never to an address in the request."""
+    _require_client_header(req)
+    owner = settings.load(app.paths.settings).get("notify_email") if app.paths else None
+    base = app.base_url().rstrip("/")
+    if not owner or app.notify is None or app.auth is None:
+        raise HttpError(409, "No email address is set yet. Log in once with the command, "
+                             "then add your email in Settings.")
+    if not base:  # the link must use the Sprite URL, never the request's Host header
+        raise HttpError(503, "Errand does not know its own URL yet. Use the command.")
+    wait = app.auth.take_email_slot()
+    if wait:
+        raise HttpError(429, f"A link was sent a moment ago. Check your inbox, or try again "
+                             f"in {wait} s.")
+    link = f"{base}/login?code={app.auth.new_login_code(EMAIL_CODE_TTL_S)}"
+    try:
+        app.notify("Your Errand login link", LOGIN_EMAIL.format(link=link), to=owner)
+    except Exception as err:
+        log.warning("login email failed: %s", err)
+        raise HttpError(502, "The email could not be sent. Use the command for now.") from err
+    return 202, {"sent_to": _mask(owner)}
+
+
+def _mask(email: str) -> str:
+    name, _, domain = email.partition("@")
+    return f"{name[:1]}•••@{domain}"
 
 
 def logout(app: App, req: Request) -> Raw:

@@ -34,9 +34,9 @@ class FakeSprite:
 
 
 class Site:
-    def __init__(self, port, gemini, sprite, auth, dispatcher):
+    def __init__(self, port, gemini, sprite, auth, dispatcher, app=None):
         self.port, self.gemini, self.sprite, self.auth = port, gemini, sprite, auth
-        self.dispatcher = dispatcher
+        self.dispatcher, self.app = dispatcher, app
 
     def call(self, method, path, body=None, headers=None):
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
@@ -68,7 +68,7 @@ def site(repo, paths):
               sprite=sprite, base_url=lambda: "https://e.sprites.app")
     httpd = make_server(app, "127.0.0.1", 0)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
-    yield Site(httpd.server_address[1], gemini, sprite, auth, dispatcher)
+    yield Site(httpd.server_address[1], gemini, sprite, auth, dispatcher, app)
     httpd.shutdown()
 
 

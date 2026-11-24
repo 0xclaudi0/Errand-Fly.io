@@ -66,3 +66,22 @@ def test_good_settings_merge(tmp_path):
                                    "auto_repair": "off", "email_from": "Me <me@example.com>"}
     path.write_text("[1]")
     assert settings.load(path) == {}
+
+
+def test_login_emails_are_rate_limited(auth, clock):
+    assert auth.take_email_slot() == 0
+    assert auth.take_email_slot() == 61  # one a minute
+    for _ in range(4):
+        clock[0] += 61
+        assert auth.take_email_slot() == 0
+    clock[0] += 61
+    wait = auth.take_email_slot()  # five an hour
+    assert 3000 < wait <= 3600
+    clock[0] += wait
+    assert auth.take_email_slot() == 0
+
+
+def test_email_codes_last_longer(auth, clock):
+    code = auth.new_login_code(ttl_s=900)
+    clock[0] += 800
+    assert auth.redeem(code)

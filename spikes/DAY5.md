@@ -72,3 +72,20 @@ cron-job.org needs an account in the owner's name, and the tick token goes into 
 
 Schedules are as exact as the cron interval: with every 5 minutes, a `daily 07:00` errand
 runs between 07:00 and 07:05.
+
+## Email login
+
+A login command scares people, so the browser login is now an email link.
+
+- `POST /login/email` sends a one-time link (15 minutes) to `notify_email` only. The
+  request cannot choose the address, and the link uses the Sprite URL from the Sprite
+  API, never the request's `Host` header.
+- It needs the `X-Errand-Client: web` header, so another site cannot press the button.
+- Rate limit: one email a minute and five an hour (times kept in `auth.json`).
+- If no address is set, or the email fails, the page says so and opens "Other ways to
+  log in" with the command. The command stays the way to log in for the first time.
+- Live check on the public URL: no header 403, first send 202 (`d•••@resend.dev`),
+  second send 429 "try again in 59 s".
+
+To get the links yourself, set your own email (your Resend account address) in Settings.
+214 tests pass.

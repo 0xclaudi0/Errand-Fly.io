@@ -92,7 +92,7 @@ def cmd_serve(args, paths, repo) -> int:
     dispatcher = Dispatcher(repo, paths, on_failure=repairer.on_failure)
     app = App(repo, dispatcher, load_or_create_secrets(paths), builder, store,
               auth=Auth(paths.auth), paths=paths, sprite=sprite, base_url=lambda: base,
-              egress_policy=egress.active_policy)
+              egress_policy=egress.active_policy, notify=send_email)
     port = int(os.environ.get("PORT", DEFAULT_PORT))
     log.info("errand-server listening on :%d, home %s", port, paths.home)
     make_server(app, "0.0.0.0", port).serve_forever()
