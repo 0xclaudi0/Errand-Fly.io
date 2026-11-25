@@ -153,6 +153,5 @@ errand_server/   HTTP server, scheduler, runner, builder agent, auth, egress, we
 errand_sdk/      helpers that errand scripts import: ask_llm, send_email, call, fetch_*, state
 examples/        hn-digest and webhook-log
 scripts/         deploy.sh, service.sh, test.sh, egress.sh
-spikes/          notes from each day of the build, and the demo runbook
 tests/           pytest suite
 ```
