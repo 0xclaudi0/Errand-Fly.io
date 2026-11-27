@@ -121,7 +121,7 @@ p { margin: 0 0 12px; }
 /* ---- hero (home) ---------------------------------------------------------- */
 
 .hero { text-align: center; padding: var(--s-md) 0 0; }
-.hero .lede { margin: 0 auto var(--s-md); }
+.hero h1.display { margin-bottom: var(--s-md); }
 .hero .composer { max-width: var(--measure); margin: 0 auto; text-align: left; }
 
 /* ---- buttons --------------------------------------------------------------- */
@@ -281,7 +281,7 @@ label.check input { width: 18px; height: 18px; accent-color: var(--accent); }
   h1 { font-size: 30px; line-height: 38px; }
   h1.display { font-size: 36px; line-height: 44px; letter-spacing: -0.6px; }
   .hero { padding-top: 8px; }
-  .hero .lede { margin-bottom: var(--gutter); }
+  .hero h1.display { margin-bottom: var(--gutter); }
   h2 { margin-top: var(--s-md); }
   .line { grid-template-columns: 1fr; gap: 2px; }
   .entry { padding: 14px 16px; grid-template-columns: 1fr; }

@@ -211,7 +211,6 @@ function requestPad() {
   const button = h("button", { class: "primary", type: "submit" }, "Build it");
   return h("section", { class: "hero" },
     h("h1", { class: "display" }, h("label", { for: "request" }, "What should Errand do?")),
-    h("p", { class: "lede" }, "Say it in plain English. Errand writes the script, tests it, and asks you before it installs anything."),
     h("form", {
       class: "card composer",
       onsubmit: async (event) => {
